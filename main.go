@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"crypto/tls"
 	"flag"
 	"io/ioutil"
@@ -64,10 +63,6 @@ func spam(https bool, request []byte, host string, in chan struct{}, out chan st
 	<-in
 	/* send the last character */
 	conn.Write(request[len(request)-1:])
-	res, err := ioutil.ReadAll(bufio.NewReader(conn))
-	if err == nil {
-		os.Stdout.Write(res)
-	}
 	/* we good, notify main and return */
 	out <- struct{}{}
 }
