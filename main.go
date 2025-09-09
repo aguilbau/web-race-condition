@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"flag"
 	"io"
 	"log"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,6 +19,7 @@ var filename string
 var host string
 var port string
 var https bool
+var preflush int
 
 var warnNoDelay sync.Once
 
@@ -25,6 +29,7 @@ func init() {
 	flag.StringVar(&host, "h", "", "host")
 	flag.StringVar(&port, "p", "", "port")
 	flag.BoolVar(&https, "s", false, "is it an https endpoint")
+	flag.IntVar(&preflush, "pr", 20, "sleep microseconds before barrier to help flush/coalescing")
 	flag.Parse()
 	if host == "" {
 		log.Fatalln("host is required ! use the -h flag to define it")
@@ -114,18 +119,67 @@ func drain(conn net.Conn) {
 	}
 }
 
+func findHTTPTriggerOffset(request []byte) int {
+	idx := bytes.Index(request, []byte("\r\n\r\n"))
+	if idx < 0 {
+		return len(request) - 1
+	}
+	headers := string(request[:idx])
+	cl := -1
+	for _, line := range strings.Split(headers, "\r\n") {
+		if len(line) == 0 {
+			continue
+		}
+		if i := strings.IndexByte(line, ':'); i > 0 {
+			name := strings.TrimSpace(strings.ToLower(line[:i]))
+			if name == "content-length" {
+				v := strings.TrimSpace(line[i+1:])
+				if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+					if n > int64(len(request)-(idx+4)) {
+						break
+					}
+					cl = int(n)
+				}
+			}
+		}
+	}
+	if cl < 0 {
+		return idx + 3
+	}
+	bodyStart := idx + 4
+	bodyEnd := bodyStart + cl
+	if bodyEnd <= 0 || bodyEnd > len(request) {
+		return len(request) - 1
+	}
+	return bodyEnd - 1
+}
+
 func spam(https bool, request []byte, host string, barrier chan struct{}, ready chan struct{}) {
 	conn, err := connect(https, host)
 	check(err)
 	defer conn.Close()
-	/* send the request, except for one character */
-	check(writeAll(conn, request[:len(request)-1]))
+	trigger := findHTTPTriggerOffset(request)
+	prefix := request[:trigger]
+	last := request[trigger : trigger+1]
+	if err := writeAll(conn, prefix); err != nil {
+		check(err)
+	}
+	if preflush > 0 {
+		time.Sleep(time.Microsecond * time.Duration(preflush))
+	}
 	/* notify main that the request was almost sent */
 	ready <- struct{}{}
 	/* sync with other goroutines */
 	<-barrier
 	/* send the last character */
-	check(writeAll(conn, request[len(request)-1:]))
+	if err := writeAll(conn, last); err != nil {
+		check(err)
+	}
+	if !https {
+		if tc, ok := conn.(*net.TCPConn); ok {
+			_ = tc.CloseWrite()
+		}
+	}
 	/* we good, notify main and return */
 	ready <- struct{}{}
 	drain(conn)
