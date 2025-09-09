@@ -3,10 +3,12 @@ package main
 import (
 	"crypto/tls"
 	"flag"
-	"io/ioutil"
+	"io"
 	"log"
 	"net"
 	"os"
+	"sync"
+	"time"
 )
 
 var routinesCount int
@@ -14,6 +16,8 @@ var filename string
 var host string
 var port string
 var https bool
+
+var warnNoDelay sync.Once
 
 func init() {
 	flag.IntVar(&routinesCount, "g", 20, "goroutines count")
@@ -43,12 +47,64 @@ func openFile(filename string) *os.File {
 }
 
 func connect(https bool, host string) (net.Conn, error) {
-	if https {
-		return tls.Dial("tcp", host, &tls.Config{
-			InsecureSkipVerify: true,
-		})
+	d := net.Dialer{Timeout: 5 * time.Second}
+	rawConn, err := d.Dial("tcp", host)
+	if err != nil {
+		return nil, err
 	}
-	return net.Dial("tcp", host)
+	if tc, ok := rawConn.(*net.TCPConn); ok {
+		if err := tc.SetNoDelay(true); err != nil {
+			warnNoDelay.Do(func() {
+				log.Println("warning: TCP_NODELAY not supported on this OS")
+			})
+		}
+	}
+	if https {
+		tlsConn := tls.Client(rawConn, &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         host,
+		})
+		tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
+		if err := tlsConn.Handshake(); err != nil {
+			_ = rawConn.Close()
+			return nil, err
+		}
+		tlsConn.SetDeadline(time.Time{})
+		return tlsConn, nil
+	}
+	return rawConn, nil
+}
+
+func writeAll(conn net.Conn, data []byte) error {
+	total := 0
+	for total < len(data) {
+		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		n, err := conn.Write(data[total:])
+		if n > 0 {
+			total += n
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func drain(conn net.Conn) {
+	buf := make([]byte, 32*1024)
+	for {
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err := conn.Read(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				return
+			}
+			if err == io.EOF {
+				return
+			}
+			return
+		}
+	}
 }
 
 func spam(https bool, request []byte, host string, in chan struct{}, out chan struct{}) {
@@ -56,21 +112,22 @@ func spam(https bool, request []byte, host string, in chan struct{}, out chan st
 	check(err)
 	defer conn.Close()
 	/* send the request, except for one character */
-	conn.Write(request[:len(request)-1])
+	writeAll(conn, request[:len(request)-1])
 	/* notify main that the request was almost sent */
 	out <- struct{}{}
 	/* sync with other goroutines */
 	<-in
 	/* send the last character */
-	conn.Write(request[len(request)-1:])
+	writeAll(conn, request[len(request)-1:])
 	/* we good, notify main and return */
 	out <- struct{}{}
+	drain(conn)
 }
 
 func main() {
 	file := openFile(filename)
 	defer file.Close()
-	request, err := ioutil.ReadAll(file)
+	request, err := io.ReadAll(file)
 	check(err)
 	if len(request) == 0 {
 		log.Fatalln("request can not be empty")
