@@ -6,6 +6,7 @@ import (
 	"flag"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"strconv"
@@ -20,19 +21,21 @@ var host string
 var port string
 var https bool
 var preflush int
+var jitter int
 
 var warnNoDelay sync.Once
 
 func init() {
-	flag.IntVar(&routinesCount, "g", 20, "goroutines count")
-	flag.StringVar(&filename, "f", "-", "file containing the request")
-	flag.StringVar(&host, "h", "", "host")
-	flag.StringVar(&port, "p", "", "port")
-	flag.BoolVar(&https, "s", false, "is it an https endpoint")
-	flag.IntVar(&preflush, "pr", 20, "sleep microseconds before barrier to help flush/coalescing")
+	flag.IntVar(&routinesCount, "goroutines", 20, "number of goroutines")
+	flag.StringVar(&filename, "file", "-", "file containing the request")
+	flag.StringVar(&host, "host", "", "host")
+	flag.StringVar(&port, "port", "", "port")
+	flag.BoolVar(&https, "https", false, "is it an https endpoint")
+	flag.IntVar(&preflush, "preflush", 20, "sleep microseconds before barrier to help flush/coalescing")
+	flag.IntVar(&jitter, "jitter", 0, "random jitter in microseconds before last byte (±J)")
 	flag.Parse()
 	if host == "" {
-		log.Fatalln("host is required ! use the -h flag to define it")
+		log.Fatalln("host is required ! use the -host flag to define it")
 	}
 	if port == "" {
 		if https {
@@ -41,6 +44,7 @@ func init() {
 			port = "80"
 		}
 	}
+	rand.Seed(time.Now().UnixNano())
 }
 
 func check(err error) {
@@ -171,6 +175,12 @@ func spam(https bool, request []byte, host string, barrier chan struct{}, ready 
 	ready <- struct{}{}
 	/* sync with other goroutines */
 	<-barrier
+	if jitter > 0 {
+		d := rand.Intn(2*jitter+1) - jitter // [-jitter, +jitter]
+		if d > 0 {
+			time.Sleep(time.Microsecond * time.Duration(d))
+		}
+	}
 	/* send the last character */
 	if err := writeAll(conn, last); err != nil {
 		check(err)
