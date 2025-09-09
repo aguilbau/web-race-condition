@@ -115,14 +115,7 @@ func drain(conn net.Conn) {
 	buf := make([]byte, 32*1024)
 	for {
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		_, err := conn.Read(buf)
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				return
-			}
-			if err == io.EOF {
-				return
-			}
+		if _, err := conn.Read(buf); err != nil {
 			return
 		}
 	}
@@ -190,14 +183,10 @@ func spam(https bool, request []byte, host string, barrier chan struct{}, ready 
 	if err := writeAll(conn, last); err != nil {
 		check(err)
 	}
-	if !https {
-		if tc, ok := conn.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
-	}
+	/* read server response */
+	drain(conn)
 	/* we good, notify main and return */
 	ready <- struct{}{}
-	drain(conn)
 }
 
 func main() {
