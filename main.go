@@ -76,9 +76,14 @@ func connect(https bool, host string) (net.Conn, error) {
 		}
 	}
 	if https {
+		name := host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			name = h
+		}
 		tlsConn := tls.Client(rawConn, &tls.Config{
 			InsecureSkipVerify: true,
-			ServerName:         host,
+			ServerName:         name,
+			NextProtos:         []string{"http/1.1"},
 		})
 		tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
 		if err := tlsConn.Handshake(); err != nil {
@@ -176,7 +181,7 @@ func spam(https bool, request []byte, host string, barrier chan struct{}, ready 
 	/* sync with other goroutines */
 	<-barrier
 	if jitter > 0 {
-		d := rand.Intn(2*jitter+1) - jitter // [-jitter, +jitter]
+		d := rand.Intn(2*jitter+1) - jitter
 		if d > 0 {
 			time.Sleep(time.Microsecond * time.Duration(d))
 		}
