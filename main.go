@@ -107,20 +107,20 @@ func drain(conn net.Conn) {
 	}
 }
 
-func spam(https bool, request []byte, host string, in chan struct{}, out chan struct{}) {
+func spam(https bool, request []byte, host string, barrier chan struct{}, ready chan struct{}) {
 	conn, err := connect(https, host)
 	check(err)
 	defer conn.Close()
 	/* send the request, except for one character */
-	writeAll(conn, request[:len(request)-1])
+	check(writeAll(conn, request[:len(request)-1]))
 	/* notify main that the request was almost sent */
-	out <- struct{}{}
+	ready <- struct{}{}
 	/* sync with other goroutines */
-	<-in
+	<-barrier
 	/* send the last character */
-	writeAll(conn, request[len(request)-1:])
+	check(writeAll(conn, request[len(request)-1:]))
 	/* we good, notify main and return */
-	out <- struct{}{}
+	ready <- struct{}{}
 	drain(conn)
 }
 
@@ -133,23 +133,23 @@ func main() {
 		log.Fatalln("request can not be empty")
 	}
 	/* channel to sync goroutines */
-	in := make(chan struct{})
+	barrier := make(chan struct{})
 	/* channel to help creating / ending goroutines */
-	out := make(chan struct{})
+	ready := make(chan struct{})
 
 	/* create "routinesCount" goroutines */
 	for i := 0; i < routinesCount; i++ {
-		go spam(https, request, host+":"+port, in, out)
+		go spam(https, request, host+":"+port, barrier, ready)
 	}
 	/* wait for them to send the request */
 	for i := 0; i < routinesCount; i++ {
-		<-out
+		<-ready
 	}
 	/* at this points, goroutines are hanging, trying to receive from "in" */
-	close(in)
+	close(barrier)
 	/* wait for all goroutines to send last character and exit */
 	for i := 0; i < routinesCount; i++ {
-		<-out
+		<-ready
 	}
-	close(out)
+	close(ready)
 }
