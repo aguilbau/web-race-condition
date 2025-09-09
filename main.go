@@ -23,11 +23,18 @@ func init() {
 	flag.IntVar(&routinesCount, "g", 20, "goroutines count")
 	flag.StringVar(&filename, "f", "-", "file containing the request")
 	flag.StringVar(&host, "h", "", "host")
-	flag.StringVar(&port, "p", "80", "port")
+	flag.StringVar(&port, "p", "", "port")
 	flag.BoolVar(&https, "s", false, "is it an https endpoint")
 	flag.Parse()
 	if host == "" {
 		log.Fatalln("host is required ! use the -h flag to define it")
+	}
+	if port == "" {
+		if https {
+			port = "443"
+		} else {
+			port = "80"
+		}
 	}
 }
 
