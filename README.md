@@ -50,4 +50,41 @@ go build -o web-race-condition main.go
 
 - For the sharpest trigger: test in plain HTTP directly on the backend
 - For TLS: increase `-preflush` (100–300 µs) if records are still merged
-- Run multiple times to maximize the chance of hitting the race window
+
+## Example
+
+A demo server is provided in the `example` directory  
+It exposes two routes:
+
+- `/insecure/{user}/transfer`  
+  Performs a SELECT to check the balance, then two UPDATEs to debit and credit  
+  This is vulnerable because two requests can both see the same balance before applying the debit.  
+  Example: if Alice has 100, two concurrent transfers of 100 may both succeed, leaving Alice with -100.
+
+- `/secure/{user}/transfer`  
+  Uses an immediate transaction with a conditional update (`money >= amount`).  
+  This prevents double-spending, because only one transaction can succeed in debiting the account.
+
+Start the server:
+```
+cd example
+./main.py
+```
+
+Run the tool against the insecure endpoint:
+```
+./web-race-condition -host 127.0.0.1 -port 8000 -file example/request_insecure.txt
+```
+Alice will end up with a negative balance :
+```
+Balances: alice=-80, bob=280
+```
+
+Restart the server to get a fresh db then run against the secure endpoint:
+```
+./web-race-condition -host 127.0.0.1 -port 8000 -file example/request_secure.txt
+```
+Here, no money was created
+```
+Balances: alice=0, bob=200
+```
