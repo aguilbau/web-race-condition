@@ -47,19 +47,16 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 }
 
-func check(err error) {
-	if err != nil {
-		log.Fatalln(err)
-	}
-}
-
-func openFile(filename string) *os.File {
+func readFile(filename string) ([]byte, error) {
 	if filename == "-" {
-		return os.Stdin
+		return io.ReadAll(os.Stdin)
 	}
 	file, err := os.Open(filename)
-	check(err)
-	return file
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return io.ReadAll(file)
 }
 
 func connect(https bool, host string) (net.Conn, error) {
@@ -75,25 +72,25 @@ func connect(https bool, host string) (net.Conn, error) {
 			})
 		}
 	}
-	if https {
-		name := host
-		if h, _, err := net.SplitHostPort(host); err == nil {
-			name = h
-		}
-		tlsConn := tls.Client(rawConn, &tls.Config{
-			InsecureSkipVerify: true,
-			ServerName:         name,
-			NextProtos:         []string{"http/1.1"},
-		})
-		tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
-		if err := tlsConn.Handshake(); err != nil {
-			_ = rawConn.Close()
-			return nil, err
-		}
-		tlsConn.SetDeadline(time.Time{})
-		return tlsConn, nil
+	if !https {
+		return rawConn, nil
 	}
-	return rawConn, nil
+	name := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		name = h
+	}
+	tlsConn := tls.Client(rawConn, &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         name,
+		NextProtos:         []string{"http/1.1"},
+	})
+	tlsConn.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := tlsConn.Handshake(); err != nil {
+		_ = rawConn.Close()
+		return nil, err
+	}
+	tlsConn.SetDeadline(time.Time{})
+	return tlsConn, nil
 }
 
 func writeAll(conn net.Conn, data []byte) error {
@@ -127,27 +124,34 @@ func findHTTPTriggerOffset(request []byte) int {
 		return len(request) - 1
 	}
 	headers := string(request[:idx])
+
 	cl := -1
 	for _, line := range strings.Split(headers, "\r\n") {
-		if len(line) == 0 {
+		if line == "" {
 			continue
 		}
-		if i := strings.IndexByte(line, ':'); i > 0 {
-			name := strings.TrimSpace(strings.ToLower(line[:i]))
-			if name == "content-length" {
-				v := strings.TrimSpace(line[i+1:])
-				if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-					if n > int64(len(request)-(idx+4)) {
-						break
-					}
-					cl = int(n)
-				}
-			}
+		i := strings.IndexByte(line, ':')
+		if i <= 0 {
+			continue
 		}
+		name := strings.TrimSpace(strings.ToLower(line[:i]))
+		if name != "content-length" {
+			continue
+		}
+		v := strings.TrimSpace(line[i+1:])
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 0 {
+			continue
+		}
+		if n > int64(len(request)-(idx+4)) {
+			break
+		}
+		cl = int(n)
 	}
 	if cl < 0 {
 		return idx + 3
 	}
+
 	bodyStart := idx + 4
 	bodyEnd := bodyStart + cl
 	if bodyEnd <= 0 || bodyEnd > len(request) {
@@ -158,13 +162,23 @@ func findHTTPTriggerOffset(request []byte) int {
 
 func spam(https bool, request []byte, host string, barrier chan struct{}, ready chan struct{}) {
 	conn, err := connect(https, host)
-	check(err)
+	if err != nil {
+		log.Println(err)
+		ready <- struct{}{}
+		ready <- struct{}{}
+		return
+	}
 	defer conn.Close()
+
 	trigger := findHTTPTriggerOffset(request)
 	prefix := request[:trigger]
 	last := request[trigger : trigger+1]
+
 	if err := writeAll(conn, prefix); err != nil {
-		check(err)
+		log.Println(err)
+		ready <- struct{}{}
+		ready <- struct{}{}
+		return
 	}
 	if preflush > 0 {
 		time.Sleep(time.Microsecond * time.Duration(preflush))
@@ -181,7 +195,7 @@ func spam(https bool, request []byte, host string, barrier chan struct{}, ready 
 	}
 	/* send the last character */
 	if err := writeAll(conn, last); err != nil {
-		check(err)
+		log.Println(err)
 	}
 	/* read server response */
 	drain(conn)
@@ -190,10 +204,10 @@ func spam(https bool, request []byte, host string, barrier chan struct{}, ready 
 }
 
 func main() {
-	file := openFile(filename)
-	defer file.Close()
-	request, err := io.ReadAll(file)
-	check(err)
+	request, err := readFile(filename)
+	if err != nil {
+		log.Fatalln(err)
+	}
 	if len(request) == 0 {
 		log.Fatalln("request can not be empty")
 	}

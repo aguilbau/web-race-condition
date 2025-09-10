@@ -44,8 +44,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        mode = parts[0]       # "secure" or "insecure"
-        user = parts[1]
+        mode, user = parts[0], parts[1]
 
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
@@ -59,62 +58,65 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if mode == "insecure":
-            conn = sqlite3.connect(DB_FILE)
-            cur = conn.cursor()
-            try:
-                cur.execute("SELECT money FROM users WHERE username=?", (user,))
-                row = cur.fetchone()
-                if not row or row[0] < amount:
-                    conn.rollback()
-                    conn.close()
-                    self.send_response(400)
-                    self.end_headers()
-                    return
-                cur.execute("UPDATE users SET money = money - ? WHERE username=?", (amount, user))
-                cur.execute("UPDATE users SET money = money + ? WHERE username=?", (amount, target))
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                conn.close()
-                self.send_response(500)
-                self.end_headers()
-                return
-            conn.close()
-
+            self.handle_insecure(user, target, amount)
         elif mode == "secure":
-            conn = sqlite3.connect(DB_FILE)
-            cur = conn.cursor()
-            try:
-                cur.execute("BEGIN IMMEDIATE")
-                # debit if enough balance
-                cur.execute(
-                    "UPDATE users SET money = money - ? WHERE username=? AND money >= ?",
-                    (amount, user, amount),
-                )
-                if cur.rowcount != 1:
-                    conn.execute("ROLLBACK")
-                    conn.close()
-                    self.send_response(400)
-                    self.end_headers()
-                    return
-                # credit in same tx
-                cur.execute("UPDATE users SET money = money + ? WHERE username=?", (amount, target))
-                conn.execute("COMMIT")
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                conn.close()
-                self.send_response(500)
-                self.end_headers()
-                return
-            conn.close()
+            self.handle_secure(user, target, amount)
         else:
             self.send_response(404)
             self.end_headers()
-            return
 
+    def handle_insecure(self, user, target, amount):
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT money FROM users WHERE username=?", (user,))
+            row = cur.fetchone()
+            if not row or row[0] < amount:
+                conn.rollback()
+                self.send_response(400)
+                self.end_headers()
+                return
+            cur.execute("UPDATE users SET money = money - ? WHERE username=?", (amount, user))
+            cur.execute("UPDATE users SET money = money + ? WHERE username=?", (amount, target))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            self.send_response(500)
+            self.end_headers()
+            return
+        finally:
+            conn.close()
+        self.respond_success(user, target, amount, "insecure")
+
+    def handle_secure(self, user, target, amount):
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute(
+                "UPDATE users SET money = money - ? WHERE username=? AND money >= ?",
+                (amount, user, amount),
+            )
+            if cur.rowcount != 1:
+                conn.execute("ROLLBACK")
+                self.send_response(400)
+                self.end_headers()
+                return
+            cur.execute("UPDATE users SET money = money + ? WHERE username=?", (amount, target))
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            self.send_response(500)
+            self.end_headers()
+            return
+        finally:
+            conn.close()
+        self.respond_success(user, target, amount, "secure")
+
+    def respond_success(self, user, target, amount, mode):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
